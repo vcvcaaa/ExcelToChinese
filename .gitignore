@@ -1,0 +1,14 @@
+*# 忽略虛擬環境資料夾
+.venv/
+venv/
+
+# 忽略 Flask 和 Python 的快取檔案
+__pycache__/
+*.pyc
+
+# 忽略上傳和下載的暫存資料夾
+uploads/
+downloads/
+
+# 忽略 VS Code 的設定資料夾
+.vscode/
