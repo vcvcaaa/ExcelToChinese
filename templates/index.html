@@ -13,7 +13,7 @@
         button { background-color: #007bff; color: white; padding: 12px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; margin-top: 20px; transition: background-color 0.3s; }
         button:hover { background-color: #0056b3; }
         button:disabled { background-color: #cccccc; cursor: not-allowed; }
-        #status { margin-top: 20px; font-weight: bold; }
+        #status { margin-top: 20px; font-weight: bold; min-height: 20px; } /* Added min-height for stability */
         .loader { border: 4px solid #f3f3f3; border-radius: 50%; border-top: 4px solid #3498db; width: 30px; height: 30px; animation: spin 2s linear infinite; margin: 20px auto; display: none; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
@@ -43,14 +43,29 @@
             const submitBtn = document.getElementById('submit-btn');
             const loader = document.getElementById('loader');
 
-            // 禁用按鈕並顯示載入動畫
-            submitBtn.disabled = true;
-            submitBtn.innerText = '處理中...';
-            loader.style.display = 'block';
-            statusDiv.innerText = '';
-            statusDiv.style.color = 'black';
+            let intervalId = null; // 用於儲存輪詢計時器的 ID
+
+            // 清理函式：用於恢復介面初始狀態
+            function cleanup(isSuccess = false) {
+                if (intervalId) {
+                    clearInterval(intervalId); // 確保停止輪詢
+                }
+                submitBtn.disabled = false;
+                submitBtn.innerText = '上傳並翻譯';
+                loader.style.display = 'none';
+                if(!isSuccess) {
+                  form.reset(); // 如果不是成功下載後，才清空表單
+                }
+            }
 
             try {
+                // 步驟 1: 禁用按鈕並發起上傳請求
+                submitBtn.disabled = true;
+                submitBtn.innerText = '上傳中...';
+                loader.style.display = 'block';
+                statusDiv.innerText = '';
+                statusDiv.style.color = 'black';
+
                 const response = await fetch('/upload', {
                     method: 'POST',
                     body: formData
@@ -58,36 +73,74 @@
 
                 const result = await response.json();
 
-                if (response.ok && result.success) {
-                    statusDiv.innerText = '✅ 翻譯成功！準備下載...';
-                    statusDiv.style.color = 'green';
-                    
-                    // 創建一個隱藏的下載連結並自動點擊
-                    const link = document.createElement('a');
-                    link.href = result.download_url;
-                    link.download = ''; // 瀏覽器會自動使用伺服器提供的檔名
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
-                    
-                    setTimeout(() => {
-                        statusDiv.innerText = '下載已開始，您可以上傳下一個檔案了。';
-                    }, 1000);
-
-                } else {
-                    statusDiv.innerText = `❌ 錯誤：${result.error || '未知錯誤'}`;
-                    statusDiv.style.color = 'red';
+                if (!response.ok || !result.success) {
+                    // 如果上傳步驟就失敗了（例如密碼錯誤），直接拋出錯誤
+                    throw new Error(result.error || '上傳失敗，請檢查檔案或密碼');
                 }
 
+                // 步驟 2: 上傳成功，開始輪詢（Polling）任務狀態
+                const jobId = result.job_id;
+                statusDiv.innerText = '✅ 上傳成功！檔案正在後端排隊處理中...';
+                submitBtn.innerText = '處理中...';
+
+                intervalId = setInterval(async () => {
+                    try {
+                        const statusResponse = await fetch(`/status/${jobId}`);
+                        if (!statusResponse.ok) {
+                            // 如果查詢狀態的請求本身失敗（例如伺服器重啟）
+                            throw new Error('無法查詢處理進度，請稍後再試');
+                        }
+                        const job = await statusResponse.json();
+
+                        if (job.status === 'completed') {
+                            // ----- 任務成功 -----
+                            clearInterval(intervalId); // 停止輪詢
+                            statusDiv.innerText = '✅ 翻譯成功！準備下載...';
+                            statusDiv.style.color = 'green';
+                            
+                            // 創建並點擊下載連結
+                            const link = document.createElement('a');
+                            link.href = job.download_url;
+                            link.download = ''; 
+                            document.body.appendChild(link);
+                            link.click();
+                            document.body.removeChild(link);
+                            
+                            setTimeout(() => {
+                                statusDiv.innerText = '下載已開始，您可以上傳下一個檔案了。';
+                            }, 1500);
+                            
+                            form.reset(); // 清空表單，準備下一次上傳
+                            cleanup(true); // 恢復介面
+
+                        } else if (job.status === 'failed') {
+                            // ----- 任務失敗 -----
+                            clearInterval(intervalId); // 停止輪詢
+                            statusDiv.innerText = `❌ 處理失敗：${job.error || '後端發生未知錯誤'}`;
+                            statusDiv.style.color = 'red';
+                            cleanup(); // 恢復介面
+
+                        } else if (job.status === 'processing') {
+                            // ----- 仍在處理中 -----
+                            statusDiv.innerText = '⚙️ 檔案翻譯中，請耐心等候...';
+                            // 不需要做任何事，等待下一次輪詢
+                        } else {
+                           // ----- 未知狀態 -----
+                           throw new Error(`收到未知的任務狀態: ${job.status}`);
+                        }
+                    } catch (pollError) {
+                        // 在輪詢過程中發生網路錯誤
+                        statusDiv.innerText = `❌ 查詢進度時出錯：${pollError.message}`;
+                        statusDiv.style.color = 'red';
+                        cleanup(); // 恢復介面
+                    }
+                }, 3000); // 設定每 3 秒查詢一次狀態
+
             } catch (error) {
-                statusDiv.innerText = `❌ 客戶端錯誤：${error}`;
+                // 捕捉初始上傳時的錯誤
+                statusDiv.innerText = `❌ 操作失敗：${error.message}`;
                 statusDiv.style.color = 'red';
-            } finally {
-                // 無論成功或失敗，都恢復按鈕狀態
-                submitBtn.disabled = false;
-                submitBtn.innerText = '上傳並翻譯';
-                loader.style.display = 'none';
-                form.reset(); // 清空表單欄位
+                cleanup(); // 恢復介面
             }
         });
     </script>
