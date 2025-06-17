@@ -9,11 +9,18 @@
         .container { background-color: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; width: 90%; max-width: 500px; }
         h1 { color: #333; }
         p { color: #666; font-size: 0.9em; }
-        input[type="password"], input[type="file"] { width: calc(100% - 20px); padding: 10px; margin-top: 20px; border: 1px solid #ccc; border-radius: 5px; }
+        /* 【修改】將 email input 的樣式也包含進來 */
+        input[type="password"], input[type="file"], input[type="email"] { 
+            width: calc(100% - 22px); 
+            padding: 10px; 
+            margin-top: 15px; 
+            border: 1px solid #ccc; 
+            border-radius: 5px; 
+        }
         button { background-color: #007bff; color: white; padding: 12px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; margin-top: 20px; transition: background-color 0.3s; }
         button:hover { background-color: #0056b3; }
         button:disabled { background-color: #cccccc; cursor: not-allowed; }
-        #status { margin-top: 20px; font-weight: bold; min-height: 20px; } /* Added min-height for stability */
+        #status { margin-top: 20px; font-weight: bold; min-height: 20px; }
         .loader { border: 4px solid #f3f3f3; border-radius: 50%; border-top: 4px solid #3498db; width: 30px; height: 30px; animation: spin 2s linear infinite; margin: 20px auto; display: none; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
@@ -21,10 +28,13 @@
 <body>
     <div class="container">
         <h1>🇻🇳 越南文 Excel 翻譯工具 🇹🇼</h1>
-        <p>請輸入密碼，並上傳您的 .xlsx 檔案。<br>系統將會自動將檔案內的越南文翻譯為繁體中文，並保留所有原始格式。</p>
+        <p>請輸入密碼並上傳 .xlsx 檔案。<br>系統將翻譯檔案並提供下載，若填寫信箱，完成後會自動寄送附件給您。</p>
         
         <form id="upload-form" enctype="multipart/form-data">
             <input type="password" id="password" name="password" placeholder="請輸入密碼" required>
+            
+            <input type="email" id="email" name="email" placeholder="（選填）輸入您的電子郵箱">
+            
             <input type="file" id="file" name="file" accept=".xlsx" required>
             <button type="submit" id="submit-btn">上傳並翻譯</button>
         </form>
@@ -106,8 +116,14 @@
                             link.click();
                             document.body.removeChild(link);
                             
+                            // 【修改】下載後，提供更友善的提示
                             setTimeout(() => {
-                                statusDiv.innerText = '下載已開始，您可以上傳下一個檔案了。';
+                                let finalMessage = '下載已開始，您可以上傳下一個檔案了。';
+                                // 檢查使用者是否輸入了郵箱，並附加提示
+                                if (document.getElementById('email').value) {
+                                    finalMessage += ' 翻譯好的檔案也將寄送到您的信箱。';
+                                }
+                                statusDiv.innerText = finalMessage;
                             }, 1500);
                             
                             form.reset(); // 清空表單，準備下一次上傳

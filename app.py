@@ -9,22 +9,33 @@ import json
 import sys
 import threading
 import traceback
+# 【新增】匯入郵件處理相關函式庫
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+
 
 # --- 設定區 ---
 # 建立 Flask 應用
 app = Flask(__name__)
 
-# 設定一個簡單的密碼
-AUTH_PASSWORD = '123'
+# 從環境變數讀取密碼，如果未設定，則使用預設值 '123'
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "123")
 UPLOAD_FOLDER = 'uploads'
 DOWNLOAD_FOLDER = 'downloads'
 GLOSSARY_FILE = 'dic.json'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
 
-# ---【新】非同步任務儲存區 ---
-# 在一個簡單的應用中，使用全域字典來儲存任務狀態是可行的。
-# 對於更大型的應用，建議使用 Redis 或資料庫。
+# --- 【新增】Email SMTP 設定 (從環境變數讀取) ---
+# 提示：為了安全，請將這些資訊設定為您伺服器的環境變數
+SMTP_HOST = os.getenv("SMTP_HOST")  # 例如: 'smtp.gmail.com'
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587)) # TLS 的預設 Port 是 587
+SMTP_USER = os.getenv("SMTP_USER")  # 您的寄件者郵箱
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD") # 您的郵箱密碼或 Google 應用程式密碼
+
+# --- 非同步任務儲存區 ---
 jobs = {}
 
 # --- 載入專業詞彙表 ---
@@ -33,6 +44,7 @@ def load_glossary(filepath):
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        # 將越南文轉為小寫以進行不區分大小寫的比對
         glossary = {item['vietnamese'].lower(): item['chinese'] for item in data}
         print(f"✅ 成功載入專業詞彙表，共 {len(glossary)} 條目。")
         return glossary
@@ -40,7 +52,6 @@ def load_glossary(filepath):
         print(f"❌ 載入詞彙表 '{filepath}' 時發生錯誤: {e}")
         return None
 
-# 在程式啟動時，載入一次詞彙表
 VIET_TO_CHI_GLOSSARY = load_glossary(GLOSSARY_FILE)
 
 # --- 設定 Gemini API 金鑰 ---
@@ -58,8 +69,46 @@ except Exception as e:
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
-# --- 核心翻譯功能 (保持不變) ---
 
+# --- 【新增】寄送電子郵件的函式 ---
+def send_email_with_attachment(recipient_email, subject, body, file_path):
+    """使用設定好的 SMTP 資訊寄送帶有附件的郵件。"""
+    # 檢查 SMTP 設定是否完整
+    if not all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD]):
+        print("警告：SMTP 電子郵件設定不完整，已跳過郵件寄送步驟。")
+        return False
+    
+    try:
+        # 建立郵件主體
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USER
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+
+        # 加入郵件文字內容
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+
+        # 加入附件
+        with open(file_path, "rb") as f:
+            part = MIMEApplication(f.read(), Name=os.path.basename(file_path))
+        part['Content-Disposition'] = f'attachment; filename="{os.path.basename(file_path)}"'
+        msg.attach(part)
+
+        # 連線到 SMTP 伺服器並寄送郵件
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()  # 啟用安全傳輸層 (TLS)
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+        
+        print(f"✅ 成功將翻譯檔案寄送至: {recipient_email}")
+        return True
+    except Exception as e:
+        print(f"❌ 寄送郵件至 {recipient_email} 時發生錯誤: {e}")
+        traceback.print_exc() # 在伺服器日誌中印出詳細錯誤
+        return False
+
+
+# --- 核心翻譯功能 (此二函式保持不變) ---
 def translate_text_batch_with_gemini(texts, separator):
     """使用 Gemini API 批次翻譯一個文字塊(chunk)，並智慧注入相關的專業詞彙。"""
     if not texts or not model:
@@ -173,11 +222,9 @@ def process_excel_file_optimized(input_path, output_path):
     workbook.save(output_path)
 
 
-# ---【新】背景處理函式 ---
+# --- 背景處理函式 (已修改) ---
 def process_file_in_background(job_id, input_path, output_path):
-    """
-    這個函式在一個獨立的執行緒中運行，以避免主應用超時。
-    """
+    """這個函式在一個獨立的執行緒中運行，以避免主應用超時。"""
     global jobs
     try:
         print(f"背景任務 {job_id} 開始處理檔案: {os.path.basename(input_path)}")
@@ -188,27 +235,37 @@ def process_file_in_background(job_id, input_path, output_path):
         jobs[job_id]['download_url'] = f'/download/{os.path.basename(output_path)}'
         print(f"背景任務 {job_id} 成功完成。")
 
+        # --- 【新增】檢查並寄送電子郵件 ---
+        job_info = jobs.get(job_id)
+        if job_info and job_info.get('email'):
+            recipient = job_info['email']
+            filename = os.path.basename(output_path)
+            subject = f"您的 Excel 翻譯任務已完成 | {filename}"
+            body = f"您好，\n\n您上傳的檔案 ({filename}) 已成功翻譯完成。\n請查收附件。\n\n此為系統自動發送的郵件，請勿直接回覆。"
+            send_email_with_attachment(recipient, subject, body, output_path)
+
     except Exception as e:
         # 任務失敗
         print(f"背景任務 {job_id} 發生嚴重錯誤: {e}")
-        traceback.print_exc() # 在伺服器日誌中印出詳細的錯誤堆疊
+        traceback.print_exc()
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['error'] = str(e)
     finally:
-        # 處理完畢後 (無論成功或失敗)，立即刪除上傳的原始檔案
+        # 處理完畢後立即刪除上傳的原始檔案
         if os.path.exists(input_path):
             os.remove(input_path)
             print(f"已刪除任務 {job_id} 的原始上傳檔案: {os.path.basename(input_path)}")
 
-# --- 路由 (Web Routes) ---
+# --- Web 路由 (Routes) ---
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
+# --- 上傳路由 (已修改) ---
 @app.route('/upload', methods=['POST'])
 def upload_file_async():
-    """【已修改】此路由現在只負責接收檔案並啟動背景任務，然後立即返回。"""
+    """此路由接收檔案和郵箱，啟動背景任務，然後立即返回。"""
     password = request.form.get('password')
     if password != AUTH_PASSWORD:
         return jsonify({'success': False, 'error': '密碼錯誤！'}), 401
@@ -222,6 +279,9 @@ def upload_file_async():
 
     if not model:
         return jsonify({'success': False, 'error': '伺服器端 Gemini 模型未成功初始化，請聯絡管理員。'}), 500
+    
+    # --- 【新增】從表單獲取電子郵箱 ---
+    user_email = request.form.get('email', None)
 
     unique_id = str(uuid.uuid4())
     original_filename = f"{unique_id}_original.xlsx"
@@ -232,25 +292,27 @@ def upload_file_async():
 
     file.save(input_path)
 
-    # 建立任務並在背景執行緒中啟動
+    # --- 【修改】建立任務時，儲存使用者郵箱 ---
     job_id = unique_id
-    jobs[job_id] = {'status': 'processing'}
+    jobs[job_id] = {
+        'status': 'processing',
+        'email': user_email # 如果使用者沒填，這裡會是 None
+    }
 
     thread = threading.Thread(
         target=process_file_in_background,
         args=(job_id, input_path, output_path)
     )
-    thread.daemon = True # 設置為守護執行緒，這樣主程式退出時它也會退出
+    thread.daemon = True
     thread.start()
 
-    # 立即回傳，告訴前端任務已經開始
-    print(f"已成功接收檔案並創建背景任務 {job_id}")
+    print(f"已成功接收檔案並創建背景任務 {job_id}。使用者郵箱: {user_email or '未提供'}")
     return jsonify({
         'success': True,
         'job_id': job_id
     })
 
-# ---【新】查詢任務狀態的路由 ---
+# --- 其他路由 (保持不變) ---
 @app.route('/status/<job_id>')
 def get_status(job_id):
     """前端會輪詢此路由以獲取任務的最新狀態。"""
@@ -258,7 +320,6 @@ def get_status(job_id):
     if not job:
         return jsonify({'status': 'not_found', 'error': '找不到指定的任務ID，可能伺服器已重啟。'}), 404
     return jsonify(job)
-
 
 @app.route('/download/<filename>')
 def download_file(filename):
@@ -269,7 +330,6 @@ def download_file(filename):
 
     @after_this_request
     def cleanup(response):
-        """下載請求結束後，從 `jobs` 字典和檔案系統中刪除任務相關資訊"""
         job_id = filename.replace("_translated.xlsx", "")
         if job_id in jobs:
             del jobs[job_id]
